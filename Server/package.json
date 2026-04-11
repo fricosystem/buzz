@@ -6,7 +6,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "mysql2": "^3.6.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "ws": "^8.17.0"
   },
   "scripts": {
     "start": "node index.js"
