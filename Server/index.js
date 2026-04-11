@@ -21,9 +21,9 @@ const promisePool = pool.promise();
 // Inicializa tabelas
 async function initDB() {
     try {
-        console.log("⏳ Tentando conectar ao banco de dados...");
+        console.log("⏳ Preparando Banco de Dados Temporário...");
         
-        // Tabela de Salas
+        // Tabela de Salas (Expira em 5 min sem ping)
         await promisePool.query(`
             CREATE TABLE IF NOT EXISTS server_rooms (
                 room_id VARCHAR(10) PRIMARY KEY,
@@ -34,44 +34,63 @@ async function initDB() {
             )
         `);
         
-        // Tabela de Jogadores Globais (Persistência por IP)
+        // Tabela de Jogadores Online (Temporária)
         await promisePool.query(`
             CREATE TABLE IF NOT EXISTS global_players (
                 ip VARCHAR(50) PRIMARY KEY,
                 username VARCHAR(50) NOT NULL,
+                current_room VARCHAR(10) DEFAULT NULL,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         `);
 
-        // Migração de colunas faltantes
-        try { await promisePool.query("ALTER TABLE server_rooms ADD COLUMN local_ip VARCHAR(50)"); } catch(e){}
-        try { await promisePool.query("ALTER TABLE server_rooms ADD COLUMN host_name VARCHAR(50)"); } catch(e){}
-
-        console.log("✅ Banco de Dados Pronto e Tabelas Atualizadas!");
+        console.log("✅ Banco de Dados Pronto!");
+        startCleanupLoop(); // Inicia o faxineiro do banco
     } catch (err) {
-        console.error("❌ Erro CRÍTICO ao iniciar DB:", err.message);
+        console.error("❌ Erro ao iniciar DB:", err.message);
         setTimeout(initDB, 5000);
     }
 }
+
+// --- FAXINEIRO AUTOMÁTICO (Limpeza de Inatividade) ---
+function startCleanupLoop() {
+    setInterval(async () => {
+        try {
+            // 1. Remove das salas quem está inativo há mais de 5 minutos (volta pro lobby)
+            await promisePool.query("UPDATE global_players SET current_room = NULL WHERE last_seen < DATE_SUB(NOW(), INTERVAL 5 MINUTE)");
+            
+            // 2. Deleta salas que o Host não manda ping há mais de 5 minutos
+            await promisePool.query("DELETE FROM server_rooms WHERE last_ping < DATE_SUB(NOW(), INTERVAL 5 MINUTE)");
+
+            // 3. REMOVE TOTALMENTE (Logout) quem sumiu há mais de 7 minutos
+            const [result] = await promisePool.query("DELETE FROM global_players WHERE last_seen < DATE_SUB(NOW(), INTERVAL 7 MINUTE)");
+            
+            if (result.affectedRows > 0) {
+                console.log(`🧹 Faxina concluída: ${result.affectedRows} almas inativas foram removidas.`);
+            }
+        } catch (err) {
+            console.error("❌ Erro na limpeza automática:", err.message);
+        }
+    }, 60000); // Roda a cada 1 minuto
+}
+
 initDB();
 
 // --- API DE CONEXÃO ---
 
 // 1. Check-in de Jogador (Persistência e Presença Global)
 app.post('/check_in', async (req, res) => {
-    const { username } = req.body;
+    const { username, room_id } = req.body;
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const cleanIp = ip.split(',')[0].trim();
 
     try {
         await promisePool.query(
-            "REPLACE INTO global_players (ip, username, last_seen) VALUES (?, ?, NOW())",
-            [cleanIp, username]
+            "REPLACE INTO global_players (ip, username, current_room, last_seen) VALUES (?, ?, ?, NOW())",
+            [cleanIp, username, room_id || null]
         );
-        console.log(`👤 Jogador ${username} fez check-in (IP: ${cleanIp})`);
-        res.json({ status: "success", username: username });
+        res.json({ status: "success" });
     } catch (err) {
-        console.error("❌ Erro no check-in:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -93,11 +112,11 @@ app.get('/get_my_name', async (req, res) => {
     }
 });
 
-// 3. Listar todos os jogadores online (vistos nos últimos 10 minutos)
+// 3. Listar todos os jogadores online (vistos nos últimos 7 minutos)
 app.get('/global_players', async (req, res) => {
     try {
         const [rows] = await promisePool.query(
-            "SELECT username FROM global_players WHERE last_seen > DATE_SUB(NOW(), INTERVAL 10 MINUTE) ORDER BY last_seen DESC"
+            "SELECT username, current_room FROM global_players WHERE last_seen > DATE_SUB(NOW(), INTERVAL 7 MINUTE) ORDER BY last_seen DESC"
         );
         res.json({ players: rows });
     } catch (err) {
@@ -112,10 +131,10 @@ app.post('/create_room', async (req, res) => {
             "REPLACE INTO server_rooms (room_id, host_ip, local_ip, host_name, last_ping) VALUES (?, ?, ?, ?, NOW())", 
             [room_id, host_ip, local_ip, host_name]
         );
-        console.log(`🏠 Sala ${room_id} criada por ${host_name}`);
+        // Vincula o host à sala
+        await promisePool.query("UPDATE global_players SET current_room = ? WHERE username = ?", [room_id, host_name]);
         res.json({ status: "success" });
     } catch (err) {
-        console.error("❌ Erro ao criar sala:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
