@@ -102,6 +102,36 @@ const promisePool = pool.promise();
 
 app.get('/', (req, res) => res.send("<h1>Lobby de Terror - Ativo e Amaldiçoado!</h1>"));
 
+// Inicializa as tabelas com schema correto
+async function initDatabase() {
+    try {
+        await promisePool.query(`
+            CREATE TABLE IF NOT EXISTS server_rooms (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                room_id VARCHAR(50) UNIQUE NOT NULL,
+                host_name VARCHAR(100) NOT NULL,
+                uid VARCHAR(200) DEFAULT '',
+                last_heartbeat DATETIME DEFAULT NOW()
+            )
+        `);
+        await promisePool.query(`
+            CREATE TABLE IF NOT EXISTS global_players (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(100) NOT NULL,
+                uid VARCHAR(200) UNIQUE DEFAULT '',
+                last_seen DATETIME DEFAULT NOW()
+            )
+        `);
+        // Adiciona coluna uid nas tabelas existentes se não tiver
+        await promisePool.query(`ALTER TABLE server_rooms ADD COLUMN IF NOT EXISTS uid VARCHAR(200) DEFAULT ''`).catch(() => {});
+        await promisePool.query(`ALTER TABLE server_rooms ADD COLUMN IF NOT EXISTS last_heartbeat DATETIME DEFAULT NOW()`).catch(() => {});
+        await promisePool.query(`ALTER TABLE global_players ADD COLUMN IF NOT EXISTS uid VARCHAR(200) DEFAULT ''`).catch(() => {});
+        console.log("✅ Banco de dados inicializado com sucesso!");
+    } catch (err) {
+        console.error("❌ Erro ao inicializar banco:", err.message);
+    }
+}
+
 app.post('/create_room', async (req, res) => {
     const { room_id, host_name, uid } = req.body;
     try {
@@ -158,4 +188,6 @@ setInterval(async () => {
 
 // ⚠️ IMPORTANTE: usar server.listen em vez de app.listen
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Servidor Relay Online na porta ${PORT}`));
+initDatabase().then(() => {
+    server.listen(PORT, () => console.log(`🚀 Servidor Relay Online na porta ${PORT}`));
+});
