@@ -114,7 +114,6 @@ async function initDatabase() {
                 last_heartbeat DATETIME DEFAULT NOW()
             )
         `);
-        console.log("✅ Tabela server_rooms pronta.");
         await promisePool.query(`
             CREATE TABLE IF NOT EXISTS global_players (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -123,11 +122,13 @@ async function initDatabase() {
                 last_seen DATETIME DEFAULT NOW()
             )
         `);
-        console.log("✅ Tabela global_players pronta.");
+        // Adiciona coluna uid nas tabelas existentes se não tiver
+        await promisePool.query(`ALTER TABLE server_rooms ADD COLUMN IF NOT EXISTS uid VARCHAR(200) DEFAULT ''`).catch(() => {});
+        await promisePool.query(`ALTER TABLE server_rooms ADD COLUMN IF NOT EXISTS last_heartbeat DATETIME DEFAULT NOW()`).catch(() => {});
+        await promisePool.query(`ALTER TABLE global_players ADD COLUMN IF NOT EXISTS uid VARCHAR(200) DEFAULT ''`).catch(() => {});
         console.log("✅ Banco de dados inicializado com sucesso!");
     } catch (err) {
         console.error("❌ Erro ao inicializar banco:", err.message);
-        throw err;
     }
 }
 
@@ -135,39 +136,57 @@ app.post('/create_room', async (req, res) => {
     const { room_id, host_name, uid } = req.body;
     try {
         await promisePool.query(
-            "INSERT INTO server_rooms (room_id, host_name, uid, last_heartbeat) VALUES (?, ?, ?, NOW()) ON DUPLICATE KEY UPDATE last_heartbeat = NOW(), host_name = ?",
-            [room_id, host_name, uid, host_name]
+            `INSERT INTO server_rooms (room_id, host_ip, local_ip, host_name, last_ping) 
+             VALUES (?, ?, ?, ?, NOW()) 
+             ON DUPLICATE KEY UPDATE last_ping = NOW(), host_name = ?`,
+            [room_id, uid || 'RAILWAY', 'RAILWAY', host_name, host_name]
         );
+        console.log(`✅ Sala criada: ${room_id} por ${host_name}`);
         res.json({ status: "success" });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        console.error("❌ Erro create_room:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/list_rooms', async (req, res) => {
     try {
         const [rows] = await promisePool.query(
-            "SELECT * FROM server_rooms WHERE last_heartbeat > NOW() - INTERVAL 5 MINUTE ORDER BY last_heartbeat DESC"
+            "SELECT * FROM server_rooms WHERE last_ping > NOW() - INTERVAL 5 MINUTE ORDER BY last_ping DESC"
         );
         res.json({ rooms: rows });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        console.error("❌ Erro list_rooms:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/delete_room', async (req, res) => {
     const { room_id } = req.body;
     try {
         await promisePool.query("DELETE FROM server_rooms WHERE room_id = ?", [room_id]);
+        console.log(`🗑️ Sala deletada: ${room_id}`);
         res.json({ status: "success" });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/check_in', async (req, res) => {
     const { username, uid } = req.body;
     try {
         await promisePool.query(
-            "INSERT INTO global_players (username, uid, last_seen) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE last_seen = NOW(), username = ?",
-            [username, uid, username]
+            `INSERT INTO global_players (ip, username, current_room, last_seen) 
+             VALUES (?, ?, ?, NOW()) 
+             ON DUPLICATE KEY UPDATE last_seen = NOW(), username = ?`,
+            [uid || 'FIREBASE', username, '', username]
         );
+        console.log(`👤 Check-in: ${username}`);
         res.json({ status: "success" });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        console.error("❌ Erro check_in:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/global_players', async (req, res) => {
@@ -176,25 +195,20 @@ app.get('/global_players', async (req, res) => {
             "SELECT username FROM global_players WHERE last_seen > NOW() - INTERVAL 2 MINUTE"
         );
         res.json({ players: rows });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
+
+// Faxineiro automático
+setInterval(async () => {
+    await promisePool.query("DELETE FROM server_rooms WHERE last_ping < NOW() - INTERVAL 5 MINUTE");
+    await promisePool.query("DELETE FROM global_players WHERE last_seen < NOW() - INTERVAL 7 MINUTE");
+    console.log("🧹 Faxineiro executado");
+}, 60000);
 
 // ⚠️ IMPORTANTE: usar server.listen em vez de app.listen
 const PORT = process.env.PORT || 3000;
 initDatabase().then(() => {
-    // Faxineiro automático — só inicia após o banco estar pronto
-    setInterval(async () => {
-        try {
-            await promisePool.query("DELETE FROM server_rooms WHERE last_heartbeat < NOW() - INTERVAL 5 MINUTE");
-            await promisePool.query("DELETE FROM global_players WHERE last_seen < NOW() - INTERVAL 7 MINUTE");
-            console.log("🧹 Limpeza automática concluída.");
-        } catch (err) {
-            console.error("❌ Erro na limpeza automática:", err.message);
-        }
-    }, 60000);
-
     server.listen(PORT, () => console.log(`🚀 Servidor Relay Online na porta ${PORT}`));
-}).catch(err => {
-    console.error("❌ Falha ao inicializar o banco. Servidor não iniciado:", err.message);
-    process.exit(1);
 });
