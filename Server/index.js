@@ -158,6 +158,17 @@ app.get('/get_room/:id', async (req, res) => {
     }
 } );
 
+app.post('/delete_room', async (req, res) => {
+    const { room_id } = req.body;
+    try {
+        await promisePool.query("DELETE FROM server_rooms WHERE room_id = ?", [room_id]);
+        console.log(`🗑️ Sala ${room_id} removida pelo Host.`);
+        res.json({ status: "success" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // 4. Limpar o Banco de Dados (Salas e Jogadores Antigos)
 app.post('/clear_db', async (req, res) => {
     try {
