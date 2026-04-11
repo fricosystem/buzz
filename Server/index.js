@@ -1,12 +1,94 @@
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
+const http = require('http');
+const { WebSocketServer, WebSocket } = require('ws');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Configuração do Banco de Dados Railway
+// Criamos um servidor HTTP para compartilhar com o WebSocket
+const server = http.createServer(app);
+
+// Relay WebSocket - os jogadores se conectam aqui
+const wss = new WebSocketServer({ server });
+
+// Mapa de salas: { "room_id": [ ws1, ws2, ... ] }
+const rooms = {};
+
+wss.on('connection', (ws) => {
+    ws.room = null;
+    ws.player_name = "Desconhecido";
+
+    ws.on('message', (data) => {
+        try {
+            const msg = JSON.parse(data);
+
+            // Jogador entra numa sala
+            if (msg.type === 'join_room') {
+                ws.room = msg.room_id;
+                ws.player_name = msg.player_name;
+
+                if (!rooms[ws.room]) rooms[ws.room] = [];
+                rooms[ws.room].push(ws);
+
+                console.log(`✅ ${ws.player_name} entrou na sala ${ws.room}`);
+
+                // Avisa todos na sala sobre o novo jogador
+                broadcast(ws.room, {
+                    type: 'player_joined',
+                    player_name: ws.player_name,
+                    player_count: rooms[ws.room].length
+                });
+            }
+
+            // Jogador marca pronto
+            if (msg.type === 'toggle_ready') {
+                ws.is_ready = !ws.is_ready;
+                broadcast(ws.room, {
+                    type: 'player_ready',
+                    player_name: ws.player_name,
+                    is_ready: ws.is_ready
+                });
+
+                // Verifica se todos estão prontos
+                const all_ready = rooms[ws.room]?.every(c => c.is_ready);
+                if (all_ready && rooms[ws.room]?.length > 1) {
+                    broadcast(ws.room, { type: 'all_ready' });
+                }
+            }
+
+            // Host inicia a partida
+            if (msg.type === 'start_game') {
+                broadcast(ws.room, { type: 'game_starting' });
+            }
+
+        } catch (e) {
+            console.error("Mensagem inválida:", e.message);
+        }
+    });
+
+    ws.on('close', () => {
+        if (ws.room && rooms[ws.room]) {
+            rooms[ws.room] = rooms[ws.room].filter(c => c !== ws);
+            if (rooms[ws.room].length === 0) delete rooms[ws.room];
+            else broadcast(ws.room, { type: 'player_left', player_name: ws.player_name });
+            console.log(`💀 ${ws.player_name} saiu da sala ${ws.room}`);
+        }
+    });
+});
+
+function broadcast(room_id, message) {
+    if (!rooms[room_id]) return;
+    const data = JSON.stringify(message);
+    rooms[room_id].forEach(client => {
+        if (client.readyState === WebSocket.OPEN) client.send(data);
+    });
+}
+
+// --- ENDPOINTS HTTP (Matchmaking) ---
+
 const pool = mysql.createPool({
     host: process.env.MYSQLHOST,
     user: process.env.MYSQLUSER,
@@ -18,31 +100,28 @@ const pool = mysql.createPool({
 });
 const promisePool = pool.promise();
 
-// --- ENDPOINTS ---
+app.get('/', (req, res) => res.send("<h1>Lobby de Terror - Ativo e Amaldiçoado!</h1>"));
 
-app.get('/', (req, res) => res.send("<h1>Lobby de Terror Online - Ativo</h1>"));
-
-// Criar Sala
 app.post('/create_room', async (req, res) => {
     const { room_id, host_name, uid } = req.body;
     try {
         await promisePool.query(
-            "INSERT INTO server_rooms (room_id, host_name, uid, last_heartbeat) VALUES (?, ?, ?, NOW()) ON DUPLICATE KEY UPDATE last_heartbeat = NOW()",
-            [room_id, host_name, uid]
+            "INSERT INTO server_rooms (room_id, host_name, uid, last_heartbeat) VALUES (?, ?, ?, NOW()) ON DUPLICATE KEY UPDATE last_heartbeat = NOW(), host_name = ?",
+            [room_id, host_name, uid, host_name]
         );
         res.json({ status: "success" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Listar Salas
 app.get('/list_rooms', async (req, res) => {
     try {
-        const [rows] = await promisePool.query("SELECT * FROM server_rooms WHERE last_heartbeat > NOW() - INTERVAL 5 MINUTE");
+        const [rows] = await promisePool.query(
+            "SELECT * FROM server_rooms WHERE last_heartbeat > NOW() - INTERVAL 5 MINUTE ORDER BY last_heartbeat DESC"
+        );
         res.json({ rooms: rows });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Deletar Sala
 app.post('/delete_room', async (req, res) => {
     const { room_id } = req.body;
     try {
@@ -51,13 +130,12 @@ app.post('/delete_room', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Check-in Global (Aparecer na lista de Almas Online)
 app.post('/check_in', async (req, res) => {
     const { username, uid } = req.body;
     try {
         await promisePool.query(
-            "INSERT INTO global_players (username, uid, last_seen) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE last_seen = NOW()",
-            [username, uid]
+            "INSERT INTO global_players (username, uid, last_seen) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE last_seen = NOW(), username = ?",
+            [username, uid, username]
         );
         res.json({ status: "success" });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -65,15 +143,19 @@ app.post('/check_in', async (req, res) => {
 
 app.get('/global_players', async (req, res) => {
     try {
-        const [rows] = await promisePool.query("SELECT username FROM global_players WHERE last_seen > NOW() - INTERVAL 2 MINUTE");
+        const [rows] = await promisePool.query(
+            "SELECT username FROM global_players WHERE last_seen > NOW() - INTERVAL 2 MINUTE"
+        );
         res.json({ players: rows });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Limpeza Automática (Faxineiro)
+// Faxineiro automático
 setInterval(async () => {
     await promisePool.query("DELETE FROM server_rooms WHERE last_heartbeat < NOW() - INTERVAL 5 MINUTE");
     await promisePool.query("DELETE FROM global_players WHERE last_seen < NOW() - INTERVAL 7 MINUTE");
 }, 60000);
 
-app.listen(process.env.PORT || 3000, () => console.log("Lobby Matchmaking Online!"));
+// ⚠️ IMPORTANTE: usar server.listen em vez de app.listen
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🚀 Servidor Relay Online na porta ${PORT}`));
