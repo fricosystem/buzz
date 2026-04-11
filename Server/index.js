@@ -114,6 +114,7 @@ async function initDatabase() {
                 last_heartbeat DATETIME DEFAULT NOW()
             )
         `);
+        console.log("✅ Tabela server_rooms pronta.");
         await promisePool.query(`
             CREATE TABLE IF NOT EXISTS global_players (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -122,13 +123,11 @@ async function initDatabase() {
                 last_seen DATETIME DEFAULT NOW()
             )
         `);
-        // Adiciona coluna uid nas tabelas existentes se não tiver
-        await promisePool.query(`ALTER TABLE server_rooms ADD COLUMN IF NOT EXISTS uid VARCHAR(200) DEFAULT ''`).catch(() => {});
-        await promisePool.query(`ALTER TABLE server_rooms ADD COLUMN IF NOT EXISTS last_heartbeat DATETIME DEFAULT NOW()`).catch(() => {});
-        await promisePool.query(`ALTER TABLE global_players ADD COLUMN IF NOT EXISTS uid VARCHAR(200) DEFAULT ''`).catch(() => {});
+        console.log("✅ Tabela global_players pronta.");
         console.log("✅ Banco de dados inicializado com sucesso!");
     } catch (err) {
         console.error("❌ Erro ao inicializar banco:", err.message);
+        throw err;
     }
 }
 
@@ -180,14 +179,22 @@ app.get('/global_players', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Faxineiro automático
-setInterval(async () => {
-    await promisePool.query("DELETE FROM server_rooms WHERE last_heartbeat < NOW() - INTERVAL 5 MINUTE");
-    await promisePool.query("DELETE FROM global_players WHERE last_seen < NOW() - INTERVAL 7 MINUTE");
-}, 60000);
-
 // ⚠️ IMPORTANTE: usar server.listen em vez de app.listen
 const PORT = process.env.PORT || 3000;
 initDatabase().then(() => {
+    // Faxineiro automático — só inicia após o banco estar pronto
+    setInterval(async () => {
+        try {
+            await promisePool.query("DELETE FROM server_rooms WHERE last_heartbeat < NOW() - INTERVAL 5 MINUTE");
+            await promisePool.query("DELETE FROM global_players WHERE last_seen < NOW() - INTERVAL 7 MINUTE");
+            console.log("🧹 Limpeza automática concluída.");
+        } catch (err) {
+            console.error("❌ Erro na limpeza automática:", err.message);
+        }
+    }, 60000);
+
     server.listen(PORT, () => console.log(`🚀 Servidor Relay Online na porta ${PORT}`));
+}).catch(err => {
+    console.error("❌ Falha ao inicializar o banco. Servidor não iniciado:", err.message);
+    process.exit(1);
 });
