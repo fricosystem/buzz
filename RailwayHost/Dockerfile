@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Baixa o Godot 4.7.dev3 para rodar via linha de comando
-RUN wget https://github.com/godotengine/godot/releases/download/4.7-dev3/Godot_v4.7-dev3_linux.x86_64.zip \
+RUN wget https://github.com/godotengine/godot-builds/releases/download/4.7-dev3/Godot_v4.7-dev3_linux.x86_64.zip \
     && unzip Godot_v4.7-dev3_linux.x86_64.zip \
     && mv Godot_v4.7-dev3_linux.x86_64 /usr/local/bin/godot \
     && rm Godot_v4.7-dev3_linux.x86_64.zip
