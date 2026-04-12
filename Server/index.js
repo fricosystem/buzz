@@ -47,6 +47,17 @@ async function initDB() {
         `);
 
         await promisePool.query(`
+            CREATE TABLE IF NOT EXISTS player_positions (
+                room_id VARCHAR(10),
+                player_name VARCHAR(50),
+                pos_x FLOAT, pos_y FLOAT, pos_z FLOAT,
+                rot_x FLOAT, rot_y FLOAT, rot_z FLOAT,
+                last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (room_id, player_name)
+            )
+        `);
+
+        await promisePool.query(`
             CREATE TABLE IF NOT EXISTS global_players (
                 ip           VARCHAR(50)  PRIMARY KEY,
                 username     VARCHAR(50)  NOT NULL,
@@ -299,9 +310,37 @@ app.post('/start_match', async (req, res) => {
             "REPLACE INTO salas_abertas (room_id, jogadores) VALUES (?, ?)",
             [room_id, JSON.stringify(jogadores)]
         );
-        // Também marca o server_room como 'starting' ou remove
         await promisePool.query("DELETE FROM server_rooms WHERE room_id = ?", [room_id]);
         res.json({ status: "success" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/update_position', async (req, res) => {
+    const { room_id, player_name, px, py, pz, rx, ry, rz } = req.body;
+    if (!room_id || !player_name) return res.json({status: "ok"});
+    try {
+        await promisePool.query(
+            "REPLACE INTO player_positions (room_id, player_name, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, last_update) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())",
+            [room_id, player_name, px, py, pz, rx, ry, rz]
+        );
+        res.json({status: "ok"});
+    } catch (err) {
+        // Ignora erros chatos de requisição atropelada
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/get_positions', async (req, res) => {
+    const { room_id } = req.query;
+    if (!room_id) return res.json({ players: [] });
+    try {
+        const [rows] = await promisePool.query(
+            "SELECT * FROM player_positions WHERE room_id = ? AND last_update > DATE_SUB(NOW(), INTERVAL 15 SECOND)",
+            [room_id]
+        );
+        res.json({ players: rows });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
