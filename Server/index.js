@@ -40,6 +40,13 @@ async function initDB() {
         `);
 
         await promisePool.query(`
+            CREATE TABLE IF NOT EXISTS salas_abertas (
+                room_id VARCHAR(10) PRIMARY KEY,
+                jogadores JSON NOT NULL
+            )
+        `);
+
+        await promisePool.query(`
             CREATE TABLE IF NOT EXISTS global_players (
                 ip           VARCHAR(50)  PRIMARY KEY,
                 username     VARCHAR(50)  NOT NULL,
@@ -280,6 +287,21 @@ app.get('/list_rooms', async (req, res) => {
             "SELECT room_id, host_name FROM server_rooms WHERE last_ping > DATE_SUB(NOW(), INTERVAL 5 MINUTE)"
         );
         res.json({ rooms: rows });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/start_match', async (req, res) => {
+    const { room_id, jogadores } = req.body;
+    try {
+        await promisePool.query(
+            "REPLACE INTO salas_abertas (room_id, jogadores) VALUES (?, ?)",
+            [room_id, JSON.stringify(jogadores)]
+        );
+        // Também marca o server_room como 'starting' ou remove
+        await promisePool.query("DELETE FROM server_rooms WHERE room_id = ?", [room_id]);
+        res.json({ status: "success" });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
