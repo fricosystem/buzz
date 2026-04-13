@@ -4,9 +4,10 @@
   "description": "Bridge for Godot and MySQL on Railway",
   "main": "index.js",
   "dependencies": {
-    "express": "^4.18.2",
-    "mysql2": "^3.6.0",
     "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2",
+    "mongoose": "^8.0.0",
     "ws": "^8.17.0"
   },
   "scripts": {
