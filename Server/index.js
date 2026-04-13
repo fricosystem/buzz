@@ -1,5 +1,6 @@
 const express = require('express');
-const mysql   = require('mysql2');
+require('dotenv').config();
+const mongoose = require('mongoose');
 const cors    = require('cors');
 const http    = require('http');
 const { WebSocketServer } = require('ws');
@@ -9,67 +10,57 @@ app.use(express.json());
 app.use(cors());
 
 // ─────────────────────────────────────────
-// CONFIGURAÇÃO DB
+// CONFIGURAÇÃO DB (100% CLOUD - MONGODB ATLAS)
 // ─────────────────────────────────────────
-const dbConfig = {
-    host:     process.env.DB_HOST     || process.env.MYSQLHOST     || 'localhost',
-    user:     process.env.DB_USER     || process.env.MYSQLUSER     || 'root',
-    password: process.env.DB_PASSWORD || process.env.MYSQLPASSWORD || '',
-    database: process.env.DB_NAME     || process.env.MYSQLDATABASE || 'railway',
-    port:     process.env.DB_PORT     || process.env.MYSQLPORT     || 3306
-};
+const MONGO_URI = process.env.MONGO_URL || process.env.MONGODB_URL;
 
-const pool        = mysql.createPool(dbConfig);
-const promisePool = pool.promise();
+if (!MONGO_URI) {
+    console.error("❌ ERRO CRÍTICO: MONGO_URL não encontrada nas variáveis de ambiente!");
+    process.exit(1);
+}
+
+// ─────────────────────────────────────────
+// MODELOS (SCHEMAS)
+// ─────────────────────────────────────────
+
+const ServerRoomSchema = new mongoose.Schema({
+    room_id:   { type: String, required: true, unique: true },
+    host_ip:   { type: String, required: true },
+    local_ip:  { type: String },
+    host_name: { type: String },
+    last_ping: { type: Date, default: Date.now }
+});
+const ServerRoom = mongoose.model('ServerRoom', ServerRoomSchema);
+
+const PlayerPositionSchema = new mongoose.Schema({
+    room_id:     { type: String, required: true },
+    player_name: { type: String, required: true },
+    pos_x: Number, pos_y: Number, pos_z: Number,
+    rot_x: Number, rot_y: Number, rot_z: Number,
+    last_update: { type: Date, default: Date.now }
+});
+PlayerPositionSchema.index({ room_id: 1, player_name: 1 }, { unique: true });
+const PlayerPosition = mongoose.model('PlayerPosition', PlayerPositionSchema);
+
+const GlobalPlayerSchema = new mongoose.Schema({
+    ip:           { type: String, required: true, unique: true },
+    username:     { type: String, required: true },
+    current_room: { type: String, default: null },
+    last_seen:    { type: Date, default: Date.now }
+});
+const GlobalPlayer = mongoose.model('GlobalPlayer', GlobalPlayerSchema);
 
 // ─────────────────────────────────────────
 // INICIALIZA BANCO
 // ─────────────────────────────────────────
 async function initDB() {
     try {
-        console.log("⏳ Preparando Banco de Dados...");
-
-        await promisePool.query(`
-            CREATE TABLE IF NOT EXISTS server_rooms (
-                room_id    VARCHAR(10)  PRIMARY KEY,
-                host_ip    VARCHAR(50)  NOT NULL,
-                local_ip   VARCHAR(50),
-                host_name  VARCHAR(50),
-                last_ping  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            )
-        `);
-
-        await promisePool.query(`
-            CREATE TABLE IF NOT EXISTS salas_abertas (
-                room_id VARCHAR(10) PRIMARY KEY,
-                jogadores JSON NOT NULL
-            )
-        `);
-
-        await promisePool.query(`
-            CREATE TABLE IF NOT EXISTS player_positions (
-                room_id VARCHAR(10),
-                player_name VARCHAR(50),
-                pos_x FLOAT, pos_y FLOAT, pos_z FLOAT,
-                rot_x FLOAT, rot_y FLOAT, rot_z FLOAT,
-                last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                PRIMARY KEY (room_id, player_name)
-            )
-        `);
-
-        await promisePool.query(`
-            CREATE TABLE IF NOT EXISTS global_players (
-                ip           VARCHAR(50)  PRIMARY KEY,
-                username     VARCHAR(50)  NOT NULL,
-                current_room VARCHAR(10)  DEFAULT NULL,
-                last_seen    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            )
-        `);
-
-        console.log("✅ Banco de Dados Pronto!");
+        console.log("⏳ Conectando ao MongoDB...");
+        await mongoose.connect(MONGO_URI);
+        console.log("✅ MongoDB Conectado!");
         startCleanupLoop();
     } catch (err) {
-        console.error("❌ Erro ao iniciar DB:", err.message);
+        console.error("❌ Erro ao conectar ao MongoDB:", err.message);
         setTimeout(initDB, 5000);
     }
 }
@@ -80,17 +71,20 @@ async function initDB() {
 function startCleanupLoop() {
     setInterval(async () => {
         try {
-            await promisePool.query(
-                "UPDATE global_players SET current_room = NULL WHERE last_seen < DATE_SUB(NOW(), INTERVAL 5 MINUTE)"
+            const fiveMinsAgo = new Date(Date.now() - 5 * 60000);
+            const sevenMinsAgo = new Date(Date.now() - 7 * 60000);
+
+            await GlobalPlayer.updateMany(
+                { last_seen: { $lt: fiveMinsAgo } },
+                { current_room: null }
             );
-            await promisePool.query(
-                "DELETE FROM server_rooms WHERE last_ping < DATE_SUB(NOW(), INTERVAL 5 MINUTE)"
-            );
-            const [result] = await promisePool.query(
-                "DELETE FROM global_players WHERE last_seen < DATE_SUB(NOW(), INTERVAL 7 MINUTE)"
-            );
-            if (result.affectedRows > 0)
-                console.log(`🧹 Faxina: ${result.affectedRows} almas removidas.`);
+
+            await ServerRoom.deleteMany({ last_ping: { $lt: fiveMinsAgo } });
+
+            const result = await GlobalPlayer.deleteMany({ last_seen: { $lt: sevenMinsAgo } });
+            
+            if (result.deletedCount > 0)
+                console.log(`🧹 Faxina: ${result.deletedCount} almas removidas.`);
         } catch (err) {
             console.error("❌ Erro na limpeza:", err.message);
         }
@@ -98,6 +92,7 @@ function startCleanupLoop() {
 }
 
 initDB();
+
 
 // ─────────────────────────────────────────
 // WEBSOCKET — controle de salas em memória
@@ -238,12 +233,14 @@ wss.on('connection', (ws) => {
 
 app.post('/check_in', async (req, res) => {
     const { username, room_id } = req.body;
+    console.log(`📩 Request: /check_in de ${username} na sala ${room_id}`);
     const ip      = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const cleanIp = ip.split(',')[0].trim();
     try {
-        await promisePool.query(
-            "REPLACE INTO global_players (ip, username, current_room, last_seen) VALUES (?, ?, ?, NOW())",
-            [cleanIp, username, room_id || null]
+        await GlobalPlayer.findOneAndUpdate(
+            { ip: cleanIp },
+            { username, current_room: room_id || null, last_seen: Date.now() },
+            { upsert: true }
         );
         res.json({ status: "success" });
     } catch (err) {
@@ -255,8 +252,8 @@ app.get('/get_my_name', async (req, res) => {
     const ip      = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const cleanIp = ip.split(',')[0].trim();
     try {
-        const [rows] = await promisePool.query("SELECT username FROM global_players WHERE ip = ?", [cleanIp]);
-        res.json(rows.length > 0 ? { username: rows[0].username } : { username: "" });
+        const player = await GlobalPlayer.findOne({ ip: cleanIp });
+        res.json(player ? { username: player.username } : { username: "" });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -264,10 +261,12 @@ app.get('/get_my_name', async (req, res) => {
 
 app.get('/global_players', async (req, res) => {
     try {
-        const [rows] = await promisePool.query(
-            "SELECT username, current_room FROM global_players WHERE last_seen > DATE_SUB(NOW(), INTERVAL 7 MINUTE) ORDER BY last_seen DESC"
-        );
-        res.json({ players: rows });
+        const sevenMinsAgo = new Date(Date.now() - 7 * 60000);
+        const players = await GlobalPlayer.find(
+            { last_seen: { $gt: sevenMinsAgo } },
+            'username current_room'
+        ).sort({ last_seen: -1 });
+        res.json({ players });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -278,13 +277,14 @@ app.post('/create_room', async (req, res) => {
     const ip      = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const cleanIp = ip.split(',')[0].trim();
     try {
-        await promisePool.query(
-            "REPLACE INTO server_rooms (room_id, host_ip, local_ip, host_name, last_ping) VALUES (?, ?, ?, ?, NOW())",
-            [room_id, cleanIp, cleanIp, host_name]
+        await ServerRoom.findOneAndUpdate(
+            { room_id },
+            { host_ip: cleanIp, local_ip: cleanIp, host_name, last_ping: Date.now() },
+            { upsert: true }
         );
-        await promisePool.query(
-            "UPDATE global_players SET current_room = ? WHERE username = ?",
-            [room_id, host_name]
+        await GlobalPlayer.updateOne(
+            { username: host_name },
+            { current_room: room_id }
         );
         res.json({ status: "success" });
     } catch (err) {
@@ -294,23 +294,21 @@ app.post('/create_room', async (req, res) => {
 
 app.get('/list_rooms', async (req, res) => {
     try {
-        const [rows] = await promisePool.query(
-            "SELECT room_id, host_name FROM server_rooms WHERE last_ping > DATE_SUB(NOW(), INTERVAL 5 MINUTE)"
+        const fiveMinsAgo = new Date(Date.now() - 5 * 60000);
+        const rooms = await ServerRoom.find(
+            { last_ping: { $gt: fiveMinsAgo } },
+            'room_id host_name'
         );
-        res.json({ rooms: rows });
+        res.json({ rooms });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
 app.post('/start_match', async (req, res) => {
-    const { room_id, jogadores } = req.body;
+    const { room_id } = req.body;
     try {
-        await promisePool.query(
-            "REPLACE INTO salas_abertas (room_id, jogadores) VALUES (?, ?)",
-            [room_id, JSON.stringify(jogadores)]
-        );
-        await promisePool.query("DELETE FROM server_rooms WHERE room_id = ?", [room_id]);
+        await ServerRoom.deleteOne({ room_id });
         res.json({ status: "success" });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -320,14 +318,15 @@ app.post('/start_match', async (req, res) => {
 app.post('/update_position', async (req, res) => {
     const { room_id, player_name, px, py, pz, rx, ry, rz } = req.body;
     if (!room_id || !player_name) return res.json({status: "ok"});
+    console.log(`📍 Pos: ${player_name} em [${px.toFixed(1)}, ${py.toFixed(1)}, ${pz.toFixed(1)}]`);
     try {
-        await promisePool.query(
-            "REPLACE INTO player_positions (room_id, player_name, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, last_update) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())",
-            [room_id, player_name, px, py, pz, rx, ry, rz]
+        await PlayerPosition.findOneAndUpdate(
+            { room_id, player_name },
+            { pos_x: px, pos_y: py, pos_z: pz, rot_x: rx, rot_y: ry, rot_z: rz, last_update: Date.now() },
+            { upsert: true }
         );
         res.json({status: "ok"});
     } catch (err) {
-        // Ignora erros chatos de requisição atropelada
         res.status(500).json({ error: err.message });
     }
 });
@@ -336,11 +335,12 @@ app.get('/get_positions', async (req, res) => {
     const { room_id } = req.query;
     if (!room_id) return res.json({ players: [] });
     try {
-        const [rows] = await promisePool.query(
-            "SELECT * FROM player_positions WHERE room_id = ? AND last_update > DATE_SUB(NOW(), INTERVAL 15 SECOND)",
-            [room_id]
-        );
-        res.json({ players: rows });
+        const fifteenSecondsAgo = new Date(Date.now() - 15000);
+        const players = await PlayerPosition.find({
+            room_id,
+            last_update: { $gt: fifteenSecondsAgo }
+        });
+        res.json({ players });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -349,7 +349,7 @@ app.get('/get_positions', async (req, res) => {
 app.post('/delete_room', async (req, res) => {
     const { room_id } = req.body;
     try {
-        await promisePool.query("DELETE FROM server_rooms WHERE room_id = ?", [room_id]);
+        await ServerRoom.deleteOne({ room_id });
         console.log(`🗑️ Sala ${room_id} removida pelo Host via HTTP.`);
         res.json({ status: "success" });
     } catch (err) {
@@ -360,7 +360,7 @@ app.post('/delete_room', async (req, res) => {
 app.post('/ping_room', async (req, res) => {
     const { room_id } = req.body;
     try {
-        await promisePool.query("UPDATE server_rooms SET last_ping = NOW() WHERE room_id = ?", [room_id]);
+        await ServerRoom.updateOne({ room_id }, { last_ping: Date.now() });
         res.json({ status: "ok" });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -369,8 +369,9 @@ app.post('/ping_room', async (req, res) => {
 
 app.post('/clear_db', async (req, res) => {
     try {
-        await promisePool.query("DELETE FROM server_rooms");
-        await promisePool.query("DELETE FROM global_players");
+        await ServerRoom.deleteMany({});
+        await GlobalPlayer.deleteMany({});
+        await PlayerPosition.deleteMany({});
         rooms.clear();
         console.log("🧹 Banco e salas em memória limpos!");
         res.json({ status: "success" });
