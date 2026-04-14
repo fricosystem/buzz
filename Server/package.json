@@ -1,7 +1,7 @@
 {
-  "name": "multiplayer-mysql-bridge",
+  "name": "multiplayer-mongodb-bridge",
   "version": "1.0.0",
-  "description": "Bridge for Godot and MySQL on Railway",
+  "description": "Bridge for Godot and MongoDB",
   "main": "index.js",
   "dependencies": {
     "cors": "^2.8.5",
