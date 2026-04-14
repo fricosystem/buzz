@@ -1,5 +1,5 @@
 const express = require('express');
-require('dotenv').config();
+try { require('dotenv').config(); } catch (e) {}
 const mongoose = require('mongoose');
 const cors    = require('cors');
 const http    = require('http');
