@@ -53,6 +53,18 @@ wss.on('connection', (ws) => {
             room.delete(ws);
             console.log(`⛔ Jogador ${ws.playerName || ws.playerId} desconectou da sala ${ws.roomId}`);
 
+            // --- NOVO: Notifica os outros jogadores que este ID saiu para eles destruírem o boneco ---
+            const leaveMsg = JSON.stringify({
+                type: 'leave',
+                id_jogador: ws.playerId
+            });
+
+            for (const client of room) {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(leaveMsg);
+                }
+            }
+
             // --- Lógica de Atualização do Supabase na Saída ---
             if (SUPABASE_KEY && ws.playerName) {
                 try {
