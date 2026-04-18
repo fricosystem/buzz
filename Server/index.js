@@ -28,8 +28,8 @@ wss.on('connection', (ws) => {
                 rooms.get(ws.roomId).add(ws);
                 console.log(`✅ Jogador ${ws.playerId} conectou na sala ${ws.roomId}`);
             } 
-            // 2. O Jogador enviou coordenadas X, Y, Z (sincronia 10x por segundo)
-            else if (data.type === 'posicao' && ws.roomId) {
+            // 2. O Jogador enviou qualquer pacote (posicao, soco, pulo, airdrop, etc)
+            else if (ws.roomId) {
                 const room = rooms.get(ws.roomId);
                 if (room) {
                     // Repassa (faz o Broadcast) rapidamente para todos os outros
@@ -37,7 +37,7 @@ wss.on('connection', (ws) => {
                     for (const client of room) {
                         // Não devolve o pacote para o próprio remetente
                         if (client !== ws && client.readyState === WebSocket.OPEN) {
-                            client.send(message); // Repassa o buffer recebido, max performance.
+                            client.send(message); // Repassa o buffer recebido (universal)
                         }
                     }
                 }
