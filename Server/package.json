@@ -1,16 +1,12 @@
 {
-  "name": "multiplayer-mongodb-bridge",
+  "name": "unity-sync-server",
   "version": "1.0.0",
-  "description": "Bridge for Godot and MongoDB",
+  "description": "Supabase + Railway Multiplayer Sync Server",
   "main": "index.js",
-  "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^17.4.2",
-    "express": "^4.18.2",
-    "mongoose": "^8.0.0",
-    "ws": "^8.17.0"
-  },
   "scripts": {
     "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
   }
 }
